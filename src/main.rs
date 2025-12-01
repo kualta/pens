@@ -23,59 +23,77 @@ use wordlist::{
 
 #[derive(Parser)]
 #[command(name = "pretty-ens")]
-#[command(about = "Check ENS (.eth) and .box domain availability", long_about = None)]
+#[command(about = "Check ENS (.eth) and .box domain availability from a wordlist")]
 struct Args {
+    /// Path to wordlist file (one word per line)
     #[arg(short, long)]
     wordlist: Option<PathBuf>,
 
+    /// Path to checkpoint file for resume support
     #[arg(short, long, default_value = "checkpoint.json")]
     checkpoint: PathBuf,
 
+    /// Check .eth domains only
     #[arg(long)]
     eth: bool,
 
-    #[arg(long, name = "box")]
+    /// Check .box domains only
+    #[arg(long = "box")]
     box_domain: bool,
 
+    /// Resume from existing checkpoint (same wordlist)
     #[arg(long)]
     resume: bool,
 
+    /// Skip already checked words (allows different wordlist)
     #[arg(long)]
     skip_existing: bool,
 
+    /// Number of concurrent requests
     #[arg(long, default_value = "5")]
     concurrency: usize,
 
+    /// ETH RPC rate limit (requests/sec)
     #[arg(long, default_value = "5")]
     eth_rps: u32,
 
+    /// RDAP rate limit for .box (requests/sec)
     #[arg(long, default_value = "2")]
     box_rps: u32,
 
+    /// Fetch wordlist from preset (use --list-presets to see options)
     #[arg(long, conflicts_with_all = ["wordlist", "status", "export"])]
     fetch_preset: Option<String>,
 
+    /// Fetch wordlist from URL
     #[arg(long, conflicts_with_all = ["wordlist", "status", "export"])]
     fetch_url: Option<String>,
 
+    /// Output file for --fetch-* or --export
     #[arg(short, long)]
     output: Option<PathBuf>,
 
+    /// Show progress status from checkpoint
     #[arg(long, conflicts_with_all = ["wordlist", "fetch_preset", "fetch_url"])]
     status: bool,
 
+    /// Export results to CSV file
     #[arg(long, conflicts_with_all = ["wordlist", "fetch_preset", "fetch_url"])]
     export: bool,
 
+    /// Filter for export: all, available, taken, error
     #[arg(long, default_value = "all")]
     filter: String,
 
+    /// List available wordlist presets
     #[arg(long)]
     list_presets: bool,
 
+    /// Pretty print available domains
     #[arg(long, conflicts_with_all = ["wordlist", "fetch_preset", "fetch_url", "export"])]
     show: bool,
 
+    /// Show only domains available on both .eth and .box
     #[arg(long)]
     both: bool,
 }
