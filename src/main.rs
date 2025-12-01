@@ -40,6 +40,9 @@ struct Args {
     #[arg(long)]
     resume: bool,
 
+    #[arg(long)]
+    skip_existing: bool,
+
     #[arg(long, default_value = "5")]
     concurrency: usize,
 
@@ -153,6 +156,7 @@ async fn main() -> Result<()> {
         check_eth,
         check_box,
         args.resume,
+        args.skip_existing,
         args.concurrency,
         args.eth_rps,
         args.box_rps,
@@ -166,6 +170,7 @@ async fn run_checker(
     check_eth: bool,
     check_box: bool,
     resume: bool,
+    skip_existing: bool,
     concurrency: usize,
     eth_rps: u32,
     box_rps: u32,
@@ -179,19 +184,23 @@ async fn run_checker(
         wordlist_path.display()
     );
 
-    let state = if resume && checkpoint_path.exists() {
+    let state = if (resume || skip_existing) && checkpoint_path.exists() {
         let mut state = CheckpointState::load(checkpoint_path).await?;
 
         if state.wordlist_hash != wordlist_hash {
-            println!("Warning: Wordlist has changed since last run.");
+            if skip_existing {
+                println!("Loading existing results, new wordlist detected.");
+            } else {
+                println!("Warning: Wordlist has changed since last run.");
+            }
             state.wordlist_hash = wordlist_hash;
             state.total_words = words.len();
         }
 
         let stats = state.get_stats();
         println!(
-            "Resuming from checkpoint: {}/{} words checked",
-            stats.checked_words, stats.total_words
+            "Loaded checkpoint: {} words already checked",
+            stats.checked_words
         );
 
         state
