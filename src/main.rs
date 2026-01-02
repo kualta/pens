@@ -13,7 +13,7 @@ use tokio::sync::broadcast;
 
 use checkpoint::{CheckpointManager, CheckpointState, DomainType, RetryEntry};
 use checker::{
-    calculate_backoff, CheckResult, DualRateLimiter, EnsChecker, RdapChecker,
+    calculate_backoff, CheckResult, DualRateLimiter, EnsChecker, IdChecker, RdapChecker,
     DEFAULT_INITIAL_BACKOFF_MS, DEFAULT_MAX_BACKOFF_SECS, DEFAULT_MAX_RETRIES,
 };
 use wordlist::{
@@ -23,7 +23,7 @@ use wordlist::{
 
 #[derive(Parser)]
 #[command(name = "pretty-ens")]
-#[command(about = "Check ENS (.eth) and .box domain availability from a wordlist")]
+#[command(about = "Check ENS (.eth), .box, and .id domain availability from a wordlist")]
 struct Args {
     /// Path to wordlist file (one word per line)
     #[arg(short, long)]
@@ -40,6 +40,10 @@ struct Args {
     /// Check .box domains only
     #[arg(long = "box")]
     box_domain: bool,
+
+    /// Check .id domains only
+    #[arg(long)]
+    id: bool,
 
     /// Resume from existing checkpoint (same wordlist)
     #[arg(long)]
@@ -60,6 +64,10 @@ struct Args {
     /// RDAP rate limit for .box (requests/sec)
     #[arg(long, default_value = "2")]
     box_rps: u32,
+
+    /// RDAP rate limit for .id (requests/sec)
+    #[arg(long, default_value = "2")]
+    id_rps: u32,
 
     /// Fetch wordlist from preset (use --list-presets to see options)
     #[arg(long, conflicts_with_all = ["wordlist", "status", "export"])]
@@ -144,7 +152,7 @@ async fn main() -> Result<()> {
 
     if args.show {
         let state = CheckpointState::load(&args.checkpoint).await?;
-        print_results(&state, args.both, args.eth, args.box_domain);
+        print_results(&state, args.both, args.eth, args.box_domain, args.id);
         return Ok(());
     }
 
@@ -165,19 +173,23 @@ async fn main() -> Result<()> {
         .wordlist
         .with_context(|| "Wordlist path required (use -w/--wordlist)")?;
 
-    let check_eth = args.eth || (!args.eth && !args.box_domain);
-    let check_box = args.box_domain || (!args.eth && !args.box_domain);
+    let any_specified = args.eth || args.box_domain || args.id;
+    let check_eth = args.eth || !any_specified;
+    let check_box = args.box_domain || !any_specified;
+    let check_id = args.id || !any_specified;
 
     run_checker(
         &wordlist,
         &args.checkpoint,
         check_eth,
         check_box,
+        check_id,
         args.resume,
         args.skip_existing,
         args.concurrency,
         args.eth_rps,
         args.box_rps,
+        args.id_rps,
     )
     .await
 }
@@ -187,11 +199,13 @@ async fn run_checker(
     checkpoint_path: &Path,
     check_eth: bool,
     check_box: bool,
+    check_id: bool,
     resume: bool,
     skip_existing: bool,
     concurrency: usize,
     eth_rps: u32,
     box_rps: u32,
+    id_rps: u32,
 ) -> Result<()> {
     let words = load_wordlist(wordlist_path).await?;
     let wordlist_hash = calculate_wordlist_hash(&words);
@@ -224,7 +238,7 @@ async fn run_checker(
         state
     } else {
         println!("Starting fresh check...");
-        CheckpointState::new(wordlist_hash, words.len(), check_eth, check_box)
+        CheckpointState::new(wordlist_hash, words.len(), check_eth, check_box, check_id)
     };
 
     let checkpoint = Arc::new(CheckpointManager::new(
@@ -245,7 +259,13 @@ async fn run_checker(
         None
     };
 
-    let rate_limiter = Arc::new(DualRateLimiter::new(eth_rps, box_rps));
+    let id_checker = if check_id {
+        Some(Arc::new(IdChecker::new()?))
+    } else {
+        None
+    };
+
+    let rate_limiter = Arc::new(DualRateLimiter::new(eth_rps, box_rps, id_rps));
 
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
     let shutdown_tx_clone = shutdown_tx.clone();
@@ -262,7 +282,8 @@ async fn run_checker(
         .filter(|w| {
             let needs_eth = check_eth && state.needs_check(w, DomainType::Eth);
             let needs_box = check_box && state.needs_check(w, DomainType::Box);
-            needs_eth || needs_box
+            let needs_id = check_id && state.needs_check(w, DomainType::Id);
+            needs_eth || needs_box || needs_id
         })
         .collect();
 
@@ -291,11 +312,13 @@ async fn run_checker(
         checkpoint.clone(),
         ens_checker,
         rdap_checker,
+        id_checker,
         rate_limiter,
         concurrency,
         progress.clone(),
         check_eth,
         check_box,
+        check_id,
     );
 
     tokio::select! {
@@ -320,17 +343,20 @@ async fn process_words(
     checkpoint: Arc<CheckpointManager>,
     ens_checker: Option<Arc<EnsChecker>>,
     rdap_checker: Option<Arc<RdapChecker>>,
+    id_checker: Option<Arc<IdChecker>>,
     rate_limiter: Arc<DualRateLimiter>,
     concurrency: usize,
     progress: ProgressBar,
     check_eth: bool,
     check_box: bool,
+    check_id: bool,
 ) -> Result<()> {
     stream::iter(words)
         .map(|word| {
             let checkpoint = checkpoint.clone();
             let ens_checker = ens_checker.clone();
             let rdap_checker = rdap_checker.clone();
+            let id_checker = id_checker.clone();
             let rate_limiter = rate_limiter.clone();
             let progress = progress.clone();
 
@@ -363,6 +389,22 @@ async fn process_words(
                             .await;
 
                             handle_result(&checkpoint, &word, DomainType::Box, result).await;
+                        }
+                    }
+                }
+
+                if check_id {
+                    if let Some(ref checker) = id_checker {
+                        if checkpoint.needs_check(&word, DomainType::Id).await {
+                            rate_limiter.wait_id().await;
+                            let result = check_with_retry(
+                                || checker.check_available(&word),
+                                &word,
+                                DomainType::Id,
+                            )
+                            .await;
+
+                            handle_result(&checkpoint, &word, DomainType::Id, result).await;
                         }
                     }
                 }

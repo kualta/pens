@@ -19,6 +19,7 @@ use thiserror::Error;
 pub const ETH_REGISTRAR_CONTROLLER: &str = "0x253553366Da8546fC250F225fe3d25d0C782303b";
 pub const PUBLIC_ETH_RPC: &str = "https://ethereum-rpc.publicnode.com";
 pub const RDAP_BOX_ENDPOINT: &str = "https://rdap.centralnic.com/box/domain";
+pub const RDAP_ID_ENDPOINT: &str = "https://rdap.pandi.id/rdap/domain";
 
 pub const DEFAULT_MAX_RETRIES: u32 = 5;
 pub const DEFAULT_INITIAL_BACKOFF_MS: u64 = 500;
@@ -96,16 +97,19 @@ pub type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 pub struct DualRateLimiter {
     pub eth: Arc<Limiter>,
     pub box_domain: Arc<Limiter>,
+    pub id_domain: Arc<Limiter>,
 }
 
 impl DualRateLimiter {
-    pub fn new(eth_rps: u32, box_rps: u32) -> Self {
+    pub fn new(eth_rps: u32, box_rps: u32, id_rps: u32) -> Self {
         let eth_quota = Quota::per_second(NonZeroU32::new(eth_rps.max(1)).unwrap());
         let box_quota = Quota::per_second(NonZeroU32::new(box_rps.max(1)).unwrap());
+        let id_quota = Quota::per_second(NonZeroU32::new(id_rps.max(1)).unwrap());
 
         Self {
             eth: Arc::new(RateLimiter::direct(eth_quota)),
             box_domain: Arc::new(RateLimiter::direct(box_quota)),
+            id_domain: Arc::new(RateLimiter::direct(id_quota)),
         }
     }
 
@@ -115,6 +119,10 @@ impl DualRateLimiter {
 
     pub async fn wait_box(&self) {
         self.box_domain.until_ready().await;
+    }
+
+    pub async fn wait_id(&self) {
+        self.id_domain.until_ready().await;
     }
 }
 
@@ -276,6 +284,73 @@ impl RdapChecker {
 impl Default for RdapChecker {
     fn default() -> Self {
         Self::new().expect("Failed to create default RdapChecker")
+    }
+}
+
+pub struct IdChecker {
+    client: Client,
+    base_url: String,
+}
+
+impl IdChecker {
+    pub fn new() -> Result<Self, CheckError> {
+        Self::with_endpoint(RDAP_ID_ENDPOINT)
+    }
+
+    pub fn with_endpoint(endpoint: &str) -> Result<Self, CheckError> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
+            .pool_max_idle_per_host(10)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(60))
+            .build()
+            .map_err(|e| CheckError::Other(format!("Failed to create HTTP client: {}", e)))?;
+
+        Ok(Self {
+            client,
+            base_url: endpoint.to_string(),
+        })
+    }
+
+    pub async fn check_available(&self, name: &str) -> CheckResult {
+        let url = format!("{}/{}.id", self.base_url, name);
+
+        match self.client.get(&url).send().await {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                match status {
+                    404 => CheckResult::Available,
+                    200 => CheckResult::Taken,
+                    429 => CheckResult::Error(CheckError::RateLimited(
+                        "Rate limited by RDAP server".to_string(),
+                    )),
+                    500..=599 => CheckResult::Error(CheckError::Http {
+                        status,
+                        message: "Server error".to_string(),
+                    }),
+                    _ => CheckResult::Error(CheckError::Http {
+                        status,
+                        message: format!("Unexpected status code: {}", status),
+                    }),
+                }
+            }
+            Err(e) => {
+                if e.is_timeout() {
+                    CheckResult::Error(CheckError::Timeout(e.to_string()))
+                } else if e.is_connect() {
+                    CheckResult::Error(CheckError::Connection(e.to_string()))
+                } else {
+                    CheckResult::Error(CheckError::Other(e.to_string()))
+                }
+            }
+        }
+    }
+}
+
+impl Default for IdChecker {
+    fn default() -> Self {
+        Self::new().expect("Failed to create default IdChecker")
     }
 }
 

@@ -19,6 +19,7 @@ pub enum DomainStatus {
 pub enum DomainType {
     Eth,
     Box,
+    Id,
 }
 
 impl std::fmt::Display for DomainType {
@@ -26,6 +27,7 @@ impl std::fmt::Display for DomainType {
         match self {
             DomainType::Eth => write!(f, "eth"),
             DomainType::Box => write!(f, "box"),
+            DomainType::Id => write!(f, "id"),
         }
     }
 }
@@ -34,8 +36,10 @@ impl std::fmt::Display for DomainType {
 pub struct WordResult {
     pub eth_status: Option<DomainStatus>,
     pub box_status: Option<DomainStatus>,
+    pub id_status: Option<DomainStatus>,
     pub eth_error: Option<String>,
     pub box_error: Option<String>,
+    pub id_error: Option<String>,
     #[serde(default)]
     pub checked_at: Option<DateTime<Utc>>,
 }
@@ -60,6 +64,8 @@ pub struct CheckpointState {
     pub retry_queue: Vec<RetryEntry>,
     pub check_eth: bool,
     pub check_box: bool,
+    #[serde(default)]
+    pub check_id: bool,
     pub started_at: DateTime<Utc>,
     pub last_updated: DateTime<Utc>,
 }
@@ -77,6 +83,7 @@ impl Default for CheckpointState {
             retry_queue: Vec::new(),
             check_eth: true,
             check_box: true,
+            check_id: true,
             started_at: now,
             last_updated: now,
         }
@@ -84,7 +91,7 @@ impl Default for CheckpointState {
 }
 
 impl CheckpointState {
-    pub fn new(wordlist_hash: String, total_words: usize, check_eth: bool, check_box: bool) -> Self {
+    pub fn new(wordlist_hash: String, total_words: usize, check_eth: bool, check_box: bool, check_id: bool) -> Self {
         let now = Utc::now();
         Self {
             version: 1,
@@ -96,6 +103,7 @@ impl CheckpointState {
             retry_queue: Vec::new(),
             check_eth,
             check_box,
+            check_id,
             started_at: now,
             last_updated: now,
         }
@@ -147,12 +155,17 @@ impl CheckpointState {
                 result.box_status = Some(status);
                 result.box_error = error;
             }
+            DomainType::Id => {
+                result.id_status = Some(status);
+                result.id_error = error;
+            }
         }
 
         let eth_done = !self.check_eth || result.eth_status.is_some();
         let box_done = !self.check_box || result.box_status.is_some();
+        let id_done = !self.check_id || result.id_status.is_some();
 
-        if eth_done && box_done {
+        if eth_done && box_done && id_done {
             self.checked_words.insert(word.to_string());
         }
 
@@ -169,6 +182,7 @@ impl CheckpointState {
             match domain_type {
                 DomainType::Eth => result.eth_status.is_none() || matches!(result.eth_status, Some(DomainStatus::Error)),
                 DomainType::Box => result.box_status.is_none() || matches!(result.box_status, Some(DomainStatus::Error)),
+                DomainType::Id => result.id_status.is_none() || matches!(result.id_status, Some(DomainStatus::Error)),
             }
         } else {
             true
@@ -182,6 +196,9 @@ impl CheckpointState {
         let mut box_available = 0;
         let mut box_taken = 0;
         let mut box_error = 0;
+        let mut id_available = 0;
+        let mut id_taken = 0;
+        let mut id_error = 0;
 
         for result in self.results.values() {
             match result.eth_status {
@@ -196,6 +213,12 @@ impl CheckpointState {
                 Some(DomainStatus::Error) => box_error += 1,
                 None => {}
             }
+            match result.id_status {
+                Some(DomainStatus::Available) => id_available += 1,
+                Some(DomainStatus::Taken) => id_taken += 1,
+                Some(DomainStatus::Error) => id_error += 1,
+                None => {}
+            }
         }
 
         CheckpointStats {
@@ -207,6 +230,9 @@ impl CheckpointState {
             box_available,
             box_taken,
             box_error,
+            id_available,
+            id_taken,
+            id_error,
             retry_queue_size: self.retry_queue.len(),
             started_at: self.started_at,
             last_updated: self.last_updated,
@@ -224,6 +250,9 @@ pub struct CheckpointStats {
     pub box_available: usize,
     pub box_taken: usize,
     pub box_error: usize,
+    pub id_available: usize,
+    pub id_taken: usize,
+    pub id_error: usize,
     pub retry_queue_size: usize,
     pub started_at: DateTime<Utc>,
     pub last_updated: DateTime<Utc>,

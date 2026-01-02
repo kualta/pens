@@ -2,3 +2,9 @@
 words.txt
 words-10k.txt
 checkpoint.json
+3-letter.txt
+3-letter-checkpoint.json
+5-letter-wiki.txt
+5-letter-wiki-checkpoint.json
+emoji-names.txt
+emoji-checkpoint.json
